@@ -81,15 +81,17 @@ def test_duplicate_registration_rejected(client):
 
 
 def test_impostor_is_rejected(client):
+    from app.config import get_settings
+
     secret, n = _register(client, "carol")
-    # Многократно: самозванец должен провалиться почти наверняка.
+    # Ограничиваем число попыток порогом, чтобы не упереться в блокировку.
+    max_f = get_settings().max_failures
     rejected = 0
-    attempts = 5
-    for _ in range(attempts):
+    for _ in range(max_f):
         _, last = _run_auth(client, "carol", secret, n, tamper=True)
         if last["status"] == "failed":
             rejected += 1
-    assert rejected == attempts
+    assert rejected == max_f
 
 
 def test_unknown_user_rejected(client):
@@ -183,3 +185,78 @@ def test_admin_requires_auth(client):
 def test_admin_wrong_password(client):
     resp = client.post("/api/admin/login", json={"username": "admin", "password": "x"})
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Тесты порога ошибок (блокировка после MAX_FAILURES последовательных неудач)
+# ---------------------------------------------------------------------------
+
+def test_lockout_after_max_failures(client):
+    """После MAX_FAILURES неудач подряд следующий start → 403."""
+    from app.config import get_settings
+
+    max_f = get_settings().max_failures
+    secret, n = _register(client, "lockuser_a")
+
+    for _ in range(max_f):
+        _, last = _run_auth(client, "lockuser_a", secret, n, tamper=True)
+        assert last["status"] == "failed"
+
+    resp = client.post("/api/auth/start", json={"username": "lockuser_a"})
+    assert resp.status_code == 403
+    assert "Превышен порог" in resp.json()["detail"]
+
+
+def test_lockout_resets_on_success(client):
+    """Успешная аутентификация сбрасывает счётчик, после чего вход снова доступен."""
+    from app.config import get_settings
+
+    max_f = get_settings().max_failures
+    secret, n = _register(client, "lockuser_b")
+
+    # MAX_FAILURES - 1 неудач (не должны привести к блокировке).
+    for _ in range(max_f - 1):
+        _, last = _run_auth(client, "lockuser_b", secret, n, tamper=True)
+        assert last["status"] == "failed"
+
+    # Успешная аутентификация сбрасывает счётчик.
+    _, last = _run_auth(client, "lockuser_b", secret, n)
+    assert last["status"] == "success"
+
+    # Вход по-прежнему доступен (счётчик обнулён).
+    resp = client.post("/api/auth/start", json={"username": "lockuser_b"})
+    assert resp.status_code == 200
+
+
+def test_partial_failures_then_lockout(client):
+    """Счётчик накапливается через несколько попыток и в итоге блокирует."""
+    from app.config import get_settings
+
+    max_f = get_settings().max_failures
+    secret, n = _register(client, "lockuser_c")
+
+    # MAX_FAILURES - 1 неудач: ещё не заблокирован.
+    for _ in range(max_f - 1):
+        _run_auth(client, "lockuser_c", secret, n, tamper=True)
+    assert client.post("/api/auth/start", json={"username": "lockuser_c"}).status_code == 200
+
+    # Ещё одна неудача — достигаем порога.
+    _run_auth(client, "lockuser_c", secret, n, tamper=True)
+    assert client.post("/api/auth/start", json={"username": "lockuser_c"}).status_code == 403
+
+
+def test_lockout_visible_in_admin_users(client):
+    """Заблокированный пользователь виден в /admin/users с filled locked_until."""
+    from app.config import get_settings
+
+    max_f = get_settings().max_failures
+    secret, n = _register(client, "lockuser_d")
+    for _ in range(max_f):
+        _run_auth(client, "lockuser_d", secret, n, tamper=True)
+
+    login = client.post("/api/admin/login", json={"username": "admin", "password": "admin"})
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
+    users = client.get("/api/admin/users", headers=headers).json()
+    locked = next(u for u in users if u["username"] == "lockuser_d")
+    assert locked["consecutive_failures"] >= max_f
+    assert locked["locked_until"] is not None

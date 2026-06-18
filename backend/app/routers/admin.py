@@ -46,6 +46,8 @@ def list_users(db: Session = Depends(get_db)):
             is_active=u.is_active,
             created_at=u.created_at,
             has_verifier=u.verifier is not None,
+            consecutive_failures=u.consecutive_failures or 0,
+            locked_until=u.locked_until,
         )
         for u in users
     ]

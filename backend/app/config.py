@@ -43,6 +43,10 @@ class Settings:
         # Файл с сохранённым модулем доверенного центра.
         self.params_file: Path = INSTANCE_DIR / "params.json"
 
+        # Порог последовательных ошибок аутентификации и длительность блокировки.
+        self.max_failures: int = int(os.getenv("ZEROFS_MAX_FAILURES", "3"))
+        self.lockout_seconds: int = int(os.getenv("ZEROFS_LOCKOUT_SECONDS", "300"))
+
         # Разрешённые источники для CORS (клиент и админ-панель).
         self.cors_origins: list[str] = os.getenv(
             "ZEROFS_CORS_ORIGINS",

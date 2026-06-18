@@ -194,10 +194,25 @@ function fmt(ts) {
   return ts ? new Date(ts).toLocaleString() : '—'
 }
 
+function LockStatus({ user }) {
+  if (!user.locked_until) {
+    if (user.consecutive_failures > 0)
+      return <span className="badge warning">{user.consecutive_failures} ош.</span>
+    return <span className="muted">—</span>
+  }
+  const until = new Date(user.locked_until)
+  const remaining = Math.max(0, Math.round((until - Date.now()) / 1000))
+  return (
+    <span className="badge failed" title={`до ${until.toLocaleString()}`}>
+      заблок. {remaining > 0 ? `(${remaining} с)` : '(истекла)'}
+    </span>
+  )
+}
+
 function UsersTable({ rows }) {
   return (
     <Table
-      columns={['ID', 'Пользователь', 'Имя', 'Активен', 'Верификатор', 'Создан']}
+      columns={['ID', 'Пользователь', 'Имя', 'Активен', 'Верификатор', 'Блокировка', 'Создан']}
       rows={rows}
       render={(u) => (
         <tr key={u.id}>
@@ -206,6 +221,7 @@ function UsersTable({ rows }) {
           <td>{u.display_name || '—'}</td>
           <td>{u.is_active ? 'да' : 'нет'}</td>
           <td>{u.has_verifier ? 'есть' : 'нет'}</td>
+          <td><LockStatus user={u} /></td>
           <td>{fmt(u.created_at)}</td>
         </tr>
       )}

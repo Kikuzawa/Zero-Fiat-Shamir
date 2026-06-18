@@ -113,6 +113,8 @@ class UserOut(BaseModel):
     is_active: bool
     created_at: datetime
     has_verifier: bool
+    consecutive_failures: int = 0
+    locked_until: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

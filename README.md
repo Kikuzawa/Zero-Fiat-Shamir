@@ -105,6 +105,8 @@ python reference_prover.py --base-url http://localhost:8000/api demo alice
 | `ZEROFS_ROUNDS` | число раундов проверки | `20` |
 | `ZEROFS_SESSION_TTL` | время жизни сессии, сек | `120` |
 | `ZEROFS_ADMIN_USER` / `ZEROFS_ADMIN_PASSWORD` | учётные данные админа | `admin` / `admin` |
+| `ZEROFS_MAX_FAILURES` | порог последовательных ошибок до блокировки | `3` |
+| `ZEROFS_LOCKOUT_SECONDS` | длительность блокировки, сек | `300` |
 | `ZEROFS_CORS_ORIGINS` | разрешённые источники CORS | localhost:5173/5174 |
 
 ## Тестирование

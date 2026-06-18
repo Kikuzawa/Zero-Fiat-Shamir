@@ -110,6 +110,20 @@ def start_session(
     if not user.is_active:
         raise AuthError("Учётная запись заблокирована", status_code=403)
 
+    # Проверяем временную блокировку по порогу ошибок.
+    if user.locked_until is not None:
+        locked_until_aware = _as_aware(user.locked_until)
+        if utcnow() < locked_until_aware:
+            remaining = int((locked_until_aware - utcnow()).total_seconds())
+            raise AuthError(
+                f"Превышен порог ошибок. Повторите через {remaining} с.",
+                status_code=403,
+            )
+        # Время блокировки истекло — автоматически снимаем.
+        user.locked_until = None
+        user.consecutive_failures = 0
+        db.commit()
+
     settings = get_settings()
     session = AuthSession(
         session_id=str(uuid.uuid4()),
@@ -225,6 +239,26 @@ def submit_response(db: Session, session_id: str, response_y: str) -> AuthSessio
             user_id=session.user_id,
             session_id=session.session_id,
         )
+
+        # Порог ошибок: увеличиваем счётчик последовательных неудач.
+        user = session.user
+        user.consecutive_failures = (user.consecutive_failures or 0) + 1
+        settings = get_settings()
+        if user.consecutive_failures >= settings.max_failures:
+            user.locked_until = utcnow() + timedelta(seconds=settings.lockout_seconds)
+            events.record_event(
+                db,
+                type=EventType.SUSPICIOUS,
+                severity=EventSeverity.CRITICAL,
+                message=(
+                    f"Пользователь '{user.username}' заблокирован на "
+                    f"{settings.lockout_seconds} с после "
+                    f"{user.consecutive_failures} последовательных неудач"
+                ),
+                user_id=user.id,
+                session_id=session.session_id,
+            )
+
         db.commit()
         db.refresh(session)
         return session
@@ -239,6 +273,9 @@ def submit_response(db: Session, session_id: str, response_y: str) -> AuthSessio
         session.status = SessionStatus.SUCCESS
         session.token = secrets.token_urlsafe(32)
         session.completed_at = utcnow()
+        # Успех: сбрасываем счётчик последовательных неудач.
+        session.user.consecutive_failures = 0
+        session.user.locked_until = None
         events.record_result(
             db,
             outcome=AuthOutcome.SUCCESS,

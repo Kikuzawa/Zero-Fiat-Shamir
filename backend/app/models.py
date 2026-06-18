@@ -75,6 +75,10 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
+    # Порог ошибок: счётчик последовательных неудачных попыток и время разблокировки.
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     verifier: Mapped["Verifier"] = relationship(
         back_populates="user", uselist=False, cascade="all, delete-orphan"
     )
