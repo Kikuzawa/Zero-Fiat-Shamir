@@ -52,6 +52,12 @@ input {
 
 .checkbox { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: var(--text); font-size: 0.85rem; }
 .checkbox input { width: auto; margin: 0; }
+.checkbox input:disabled { opacity: 0.5; }
+
+.modes { border: 1px solid #334155; border-radius: 8px; padding: 10px 14px; margin-top: 16px; }
+.modes legend { color: var(--muted); font-size: 0.8rem; padding: 0 6px; }
+.radio { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--text); font-size: 0.85rem; }
+.radio input { width: auto; margin: 0; }
 
 .buttons { display: flex; gap: 12px; margin-top: 16px; }
 

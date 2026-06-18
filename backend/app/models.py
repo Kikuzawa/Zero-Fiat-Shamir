@@ -119,8 +119,12 @@ class AuthSession(Base):
     status: Mapped[SessionStatus] = mapped_column(
         Enum(SessionStatus), default=SessionStatus.AWAITING_COMMITMENT, nullable=False
     )
+    # Режим проверки: interactive (пошаговый) или non-interactive (один пакет).
+    mode: Mapped[str] = mapped_column(String(16), default="interactive", nullable=False)
     total_rounds: Mapped[int] = mapped_column(Integer, nullable=False)
     current_round: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Сколько раз данные пришлось переотправить из-за искажения в канале.
+    integrity_errors: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # Текущее обязательство x и бит-запрос e (внутри активного раунда).
     commitment_x: Mapped[str | None] = mapped_column(Text, nullable=True)

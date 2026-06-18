@@ -54,19 +54,27 @@ def _migrate_schema() -> None:
     повторного запуска: добавляются только отсутствующие колонки.
     """
     inspector = inspect(engine)
-    if "users" not in inspector.get_table_names():
-        return
-
-    existing = {col["name"] for col in inspector.get_columns("users")}
+    tables = set(inspector.get_table_names())
     is_sqlite = settings.database_url.startswith("sqlite")
     ts_type = "DATETIME" if is_sqlite else "DATETIME NULL"
 
-    additions = {
-        "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
-        "locked_until": ts_type,
+    # таблица -> {колонка: DDL-описание типа}
+    additions: dict[str, dict[str, str]] = {
+        "users": {
+            "consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
+            "locked_until": ts_type,
+        },
+        "auth_sessions": {
+            "mode": "VARCHAR(16) NOT NULL DEFAULT 'interactive'",
+            "integrity_errors": "INTEGER NOT NULL DEFAULT 0",
+        },
     }
 
     with engine.begin() as conn:
-        for column, ddl in additions.items():
-            if column not in existing:
-                conn.execute(text(f"ALTER TABLE users ADD COLUMN {column} {ddl}"))
+        for table, columns in additions.items():
+            if table not in tables:
+                continue
+            existing = {col["name"] for col in inspector.get_columns(table)}
+            for column, ddl in columns.items():
+                if column not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))

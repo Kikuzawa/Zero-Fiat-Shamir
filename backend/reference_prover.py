@@ -15,7 +15,13 @@ import secrets
 
 import httpx
 
-from app.crypto import egcd, make_response, mod_pow
+from app.crypto import (
+    derive_challenges,
+    egcd,
+    make_response,
+    mod_pow,
+    value_checksum,
+)
 
 
 class ProverClient:
@@ -75,7 +81,12 @@ class ProverClient:
             r = 1 + secrets.randbelow(self.n - 1)
             x = mod_pow(r, 2, self.n)
             commit = self._client.post(
-                "/auth/commit", json={"session_id": session_id, "commitment_x": str(x)}
+                "/auth/commit",
+                json={
+                    "session_id": session_id,
+                    "commitment_x": str(x),
+                    "checksum": value_checksum(str(x)),
+                },
             )
             commit.raise_for_status()
             e = commit.json()["challenge_e"]
@@ -85,13 +96,47 @@ class ProverClient:
             y = make_response(r, used_secret, e, self.n)
 
             respond = self._client.post(
-                "/auth/respond", json={"session_id": session_id, "response_y": str(y)}
+                "/auth/respond",
+                json={
+                    "session_id": session_id,
+                    "response_y": str(y),
+                    "checksum": value_checksum(str(y)),
+                },
             )
             respond.raise_for_status()
             last = respond.json()
             if not last["accepted"]:
                 break
         return last
+
+    # --- неинтерактивная аутентификация (эвристика Фиата–Шамира) -----------
+    def authenticate_noninteractive(
+        self, username: str, secret: int, *, tamper: bool = False
+    ) -> dict:
+        """Сформировать всё доказательство одним пакетом и отправить разом.
+
+        Запросы выводятся локально из хэша обязательств — обмен по сети сводится
+        к единственному запросу, а обрыв связи лечится повторной отправкой.
+        """
+        assert self.n is not None and self.rounds is not None
+        v = self.compute_verifier(secret)  # настоящий верификатор (как у сервера)
+        used_secret = (secret + 1) if tamper else secret
+
+        rs = [1 + secrets.randbelow(self.n - 1) for _ in range(self.rounds)]
+        xs = [mod_pow(r, 2, self.n) for r in rs]
+        challenges = derive_challenges(self.n, v, xs, self.rounds)
+        ys = [make_response(rs[i], used_secret, challenges[i], self.n) for i in range(self.rounds)]
+
+        resp = self._client.post(
+            "/auth/verify-proof",
+            json={
+                "username": username,
+                "commitments": [str(x) for x in xs],
+                "responses": [str(y) for y in ys],
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 def _demo(base_url: str, username: str) -> None:
@@ -114,6 +159,17 @@ def _demo(base_url: str, username: str) -> None:
     print(
         f"Итог: {bad['status']} | пройдено раундов: "
         f"{bad['rounds_completed']}/{bad['total_rounds']}"
+    )
+
+    print("\n-- Неинтерактивная аутентификация (один пакет) --")
+    noni = client.authenticate_noninteractive(username, secret)
+    print(f"Итог: {noni['status']} | сообщение: {noni['message']}")
+
+    print("\n-- Неинтерактивная попытка самозванца --")
+    noni_bad = client.authenticate_noninteractive(username, secret, tamper=True)
+    print(
+        f"Итог: {noni_bad['status']} | пройдено раундов: "
+        f"{noni_bad['rounds_completed']}/{noni_bad['total_rounds']}"
     )
 
 

@@ -21,7 +21,12 @@ from datetime import timedelta
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..crypto import make_challenge, verify_round_detailed
+from ..crypto import (
+    derive_challenges,
+    make_challenge,
+    value_checksum,
+    verify_round_detailed,
+)
 from ..models import (
     AuthOutcome,
     AuthRoundLog,
@@ -84,12 +89,10 @@ def _ensure_not_expired(db: Session, session: AuthSession) -> None:
         raise AuthError("Истекло время сессии аутентификации", status_code=410)
 
 
-def start_session(
-    db: Session,
-    username: str,
-    client_ip: str | None = None,
-    user_agent: str | None = None,
-) -> AuthSession:
+def _lookup_active_user(
+    db: Session, username: str, client_ip: str | None
+) -> User:
+    """Найти пользователя, проверить активность и блокировку по порогу ошибок."""
     user = db.query(User).filter(User.username == username).first()
     if user is None or user.verifier is None:
         # Не раскрываем, существует ли пользователь, но фиксируем попытку.
@@ -124,6 +127,47 @@ def start_session(
         user.consecutive_failures = 0
         db.commit()
 
+    return user
+
+
+def _register_failure(db: Session, user: User, session: AuthSession) -> None:
+    """Учесть проваленную попытку: инкремент счётчика и блокировка при пороге.
+
+    Вызывается только для математически неверного отклика (реальный отказ),
+    но НЕ для искажений канала и НЕ для таймаутов — это технические сбои.
+    """
+    user.consecutive_failures = (user.consecutive_failures or 0) + 1
+    settings = get_settings()
+    if user.consecutive_failures >= settings.max_failures:
+        user.locked_until = utcnow() + timedelta(seconds=settings.lockout_seconds)
+        events.record_event(
+            db,
+            type=EventType.SUSPICIOUS,
+            severity=EventSeverity.CRITICAL,
+            message=(
+                f"Пользователь '{user.username}' заблокирован на "
+                f"{settings.lockout_seconds} с после "
+                f"{user.consecutive_failures} последовательных неудач"
+            ),
+            user_id=user.id,
+            session_id=session.session_id,
+        )
+
+
+def _register_success(user: User) -> None:
+    """Сбросить счётчик ошибок после успешной аутентификации."""
+    user.consecutive_failures = 0
+    user.locked_until = None
+
+
+def start_session(
+    db: Session,
+    username: str,
+    client_ip: str | None = None,
+    user_agent: str | None = None,
+) -> AuthSession:
+    user = _lookup_active_user(db, username, client_ip)
+
     settings = get_settings()
     session = AuthSession(
         session_id=str(uuid.uuid4()),
@@ -148,7 +192,18 @@ def _get_session(db: Session, session_id: str) -> AuthSession:
     return session
 
 
-def submit_commitment(db: Session, session_id: str, commitment_x: str) -> tuple[AuthSession, int]:
+def submit_commitment(
+    db: Session,
+    session_id: str,
+    commitment_x: str,
+    checksum: str | None = None,
+) -> tuple[AuthSession, int | None, bool]:
+    """Шаг обязательства.
+
+    Возвращает (session, e, integrity_error). Если контрольная сумма не сошлась,
+    данные искажены в канале: состояние не меняется, e не выдаётся, клиент
+    переотправляет обязательство (технический сбой, без штрафа).
+    """
     session = _get_session(db, session_id)
     _ensure_not_expired(db, session)
 
@@ -156,6 +211,13 @@ def submit_commitment(db: Session, session_id: str, commitment_x: str) -> tuple[
         raise AuthError(
             f"Недопустимое состояние сессии для обязательства: {session.status.value}"
         )
+
+    # Контроль целостности: искажение в канале ≠ неверный ответ.
+    if checksum is not None and value_checksum(commitment_x) != checksum:
+        session.integrity_errors = (session.integrity_errors or 0) + 1
+        db.commit()
+        db.refresh(session)
+        return session, None, True
 
     try:
         x = int(commitment_x)
@@ -172,10 +234,21 @@ def submit_commitment(db: Session, session_id: str, commitment_x: str) -> tuple[
     session.status = SessionStatus.AWAITING_RESPONSE
     db.commit()
     db.refresh(session)
-    return session, e
+    return session, e, False
 
 
-def submit_response(db: Session, session_id: str, response_y: str) -> AuthSession:
+def submit_response(
+    db: Session,
+    session_id: str,
+    response_y: str,
+    checksum: str | None = None,
+) -> tuple[AuthSession, bool]:
+    """Шаг отклика.
+
+    Возвращает (session, integrity_error). При несовпадении контрольной суммы
+    данные искажены в канале: состояние и запрос e сохраняются, клиент
+    переотправляет отклик — это технический сбой и в порог ошибок не идёт.
+    """
     session = _get_session(db, session_id)
     _ensure_not_expired(db, session)
 
@@ -183,6 +256,13 @@ def submit_response(db: Session, session_id: str, response_y: str) -> AuthSessio
         raise AuthError(
             f"Недопустимое состояние сессии для отклика: {session.status.value}"
         )
+
+    # Контроль целостности: искажение в канале ≠ неверный ответ.
+    if checksum is not None and value_checksum(response_y) != checksum:
+        session.integrity_errors = (session.integrity_errors or 0) + 1
+        db.commit()
+        db.refresh(session)
+        return session, True
 
     verifier: Verifier = session.user.verifier
     n = int(verifier.modulus_n)
@@ -241,27 +321,11 @@ def submit_response(db: Session, session_id: str, response_y: str) -> AuthSessio
         )
 
         # Порог ошибок: увеличиваем счётчик последовательных неудач.
-        user = session.user
-        user.consecutive_failures = (user.consecutive_failures or 0) + 1
-        settings = get_settings()
-        if user.consecutive_failures >= settings.max_failures:
-            user.locked_until = utcnow() + timedelta(seconds=settings.lockout_seconds)
-            events.record_event(
-                db,
-                type=EventType.SUSPICIOUS,
-                severity=EventSeverity.CRITICAL,
-                message=(
-                    f"Пользователь '{user.username}' заблокирован на "
-                    f"{settings.lockout_seconds} с после "
-                    f"{user.consecutive_failures} последовательных неудач"
-                ),
-                user_id=user.id,
-                session_id=session.session_id,
-            )
+        _register_failure(db, session.user, session)
 
         db.commit()
         db.refresh(session)
-        return session
+        return session, False
 
     # Раунд успешно пройден.
     session.current_round += 1
@@ -274,8 +338,7 @@ def submit_response(db: Session, session_id: str, response_y: str) -> AuthSessio
         session.token = secrets.token_urlsafe(32)
         session.completed_at = utcnow()
         # Успех: сбрасываем счётчик последовательных неудач.
-        session.user.consecutive_failures = 0
-        session.user.locked_until = None
+        _register_success(session.user)
         events.record_result(
             db,
             outcome=AuthOutcome.SUCCESS,
@@ -298,6 +361,141 @@ def submit_response(db: Session, session_id: str, response_y: str) -> AuthSessio
     else:
         # Переходим к следующему раунду.
         session.status = SessionStatus.AWAITING_COMMITMENT
+
+    db.commit()
+    db.refresh(session)
+    return session, False
+
+
+def verify_proof(
+    db: Session,
+    username: str,
+    commitments: list[str],
+    responses: list[str],
+    client_ip: str | None = None,
+    user_agent: str | None = None,
+) -> AuthSession:
+    """Неинтерактивная проверка (эвристика Фиата–Шамира): одно доказательство.
+
+    Клиент присылает все обязательства x_1..x_t и отклики y_1..y_t одним
+    пакетом. Запросы e_i выводятся детерминированно из хэша всех обязательств,
+    поэтому обмен «вопрос-ответ» по сети не нужен, а обрыв связи лечится
+    повторной отправкой того же пакета без потери стойкости (2^-t).
+    """
+    user = _lookup_active_user(db, username, client_ip)
+    verifier: Verifier = user.verifier
+    n = int(verifier.modulus_n)
+    v = int(verifier.verifier_v)
+    rounds = verifier.rounds
+
+    if len(commitments) != rounds or len(responses) != rounds:
+        raise AuthError(
+            f"Ожидается по {rounds} обязательств и откликов "
+            f"(получено {len(commitments)} и {len(responses)})"
+        )
+
+    try:
+        xs = [int(x) for x in commitments]
+        ys = [int(y) for y in responses]
+    except ValueError as exc:
+        raise AuthError("Обязательства и отклики должны быть целыми числами") from exc
+
+    for x in xs:
+        if not (0 < x < n):
+            raise AuthError("Обязательство вне диапазона (0, n)")
+
+    challenges = derive_challenges(n, v, xs, rounds)
+
+    session = AuthSession(
+        session_id=str(uuid.uuid4()),
+        user_id=user.id,
+        status=SessionStatus.AWAITING_RESPONSE,
+        mode="non-interactive",
+        total_rounds=rounds,
+        current_round=0,
+        client_ip=client_ip,
+        user_agent=(user_agent or "")[:256] or None,
+        expires_at=utcnow(),
+    )
+    db.add(session)
+    db.flush()  # session_id доступен для журналов раундов
+
+    all_ok = True
+    passed = 0
+    for i in range(rounds):
+        e = challenges[i]
+        detail = verify_round_detailed(commitment=xs[i], challenge=e, response=ys[i], verifier=v, n=n)
+        ok = detail["verified"]
+        db.add(
+            AuthRoundLog(
+                session_id=session.session_id,
+                user_id=user.id,
+                round_index=i + 1,
+                commitment_x=str(xs[i]),
+                challenge_e=e,
+                response_y=str(ys[i]),
+                lhs=str(detail["lhs"]),
+                rhs=str(detail["rhs"]),
+                verified=ok,
+            )
+        )
+        if ok:
+            passed += 1
+        else:
+            all_ok = False
+            break
+
+    session.current_round = passed
+    session.completed_at = utcnow()
+
+    if all_ok:
+        session.status = SessionStatus.SUCCESS
+        session.token = secrets.token_urlsafe(32)
+        _register_success(user)
+        events.record_result(
+            db,
+            outcome=AuthOutcome.SUCCESS,
+            user_id=user.id,
+            username=user.username,
+            session_id=session.session_id,
+            rounds_completed=passed,
+            total_rounds=rounds,
+            detail="Неинтерактивное доказательство принято",
+            client_ip=client_ip,
+        )
+        events.record_event(
+            db,
+            type=EventType.LOGIN_SUCCESS,
+            severity=EventSeverity.INFO,
+            message=f"Успешная неинтерактивная аутентификация '{user.username}'",
+            user_id=user.id,
+            session_id=session.session_id,
+        )
+    else:
+        session.status = SessionStatus.FAILED
+        events.record_result(
+            db,
+            outcome=AuthOutcome.FAILURE,
+            user_id=user.id,
+            username=user.username,
+            session_id=session.session_id,
+            rounds_completed=passed,
+            total_rounds=rounds,
+            detail=f"Неинтерактивное доказательство отклонено в раунде {passed + 1}",
+            client_ip=client_ip,
+        )
+        events.record_event(
+            db,
+            type=EventType.LOGIN_FAILURE,
+            severity=EventSeverity.WARNING,
+            message=(
+                f"Неудачная неинтерактивная аутентификация '{user.username}' "
+                f"в раунде {passed + 1}"
+            ),
+            user_id=user.id,
+            session_id=session.session_id,
+        )
+        _register_failure(db, user, session)
 
     db.commit()
     db.refresh(session)

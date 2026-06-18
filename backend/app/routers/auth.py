@@ -11,6 +11,8 @@ from ..schemas import (
     AuthStartResponse,
     CommitRequest,
     CommitResponse,
+    ProofRequest,
+    ProofResponse,
     RespondRequest,
     RespondResponse,
     SessionStatusResponse,
@@ -50,11 +52,21 @@ def start(payload: AuthStartRequest, request: Request, db: Session = Depends(get
 @router.post("/commit", response_model=CommitResponse)
 def commit(payload: CommitRequest, db: Session = Depends(get_db)):
     try:
-        session, e = auth_service.submit_commitment(
-            db, payload.session_id, payload.commitment_x
+        session, e, integrity_error = auth_service.submit_commitment(
+            db, payload.session_id, payload.commitment_x, payload.checksum
         )
     except auth_service.AuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    if integrity_error:
+        return CommitResponse(
+            session_id=session.session_id,
+            round_index=session.current_round + 1,
+            challenge_e=None,
+            status=session.status.value,
+            integrity_error=True,
+            message="Данные обязательства искажены в канале — переотправьте раунд",
+        )
 
     return CommitResponse(
         session_id=session.session_id,
@@ -67,9 +79,23 @@ def commit(payload: CommitRequest, db: Session = Depends(get_db)):
 @router.post("/respond", response_model=RespondResponse)
 def respond(payload: RespondRequest, db: Session = Depends(get_db)):
     try:
-        session = auth_service.submit_response(db, payload.session_id, payload.response_y)
+        session, integrity_error = auth_service.submit_response(
+            db, payload.session_id, payload.response_y, payload.checksum
+        )
     except auth_service.AuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    if integrity_error:
+        return RespondResponse(
+            session_id=session.session_id,
+            accepted=False,
+            status=session.status.value,
+            rounds_completed=session.current_round,
+            total_rounds=session.total_rounds,
+            token=None,
+            message="Данные отклика искажены в канале — переотправьте раунд",
+            integrity_error=True,
+        )
 
     accepted = session.status != SessionStatus.FAILED
     if session.status == SessionStatus.SUCCESS:
@@ -80,6 +106,38 @@ def respond(payload: RespondRequest, db: Session = Depends(get_db)):
         message = "Раунд пройден, продолжайте следующий раунд"
 
     return RespondResponse(
+        session_id=session.session_id,
+        accepted=accepted,
+        status=session.status.value,
+        rounds_completed=session.current_round,
+        total_rounds=session.total_rounds,
+        token=session.token,
+        message=message,
+    )
+
+
+@router.post("/verify-proof", response_model=ProofResponse)
+def verify_proof(payload: ProofRequest, request: Request, db: Session = Depends(get_db)):
+    """Неинтерактивная проверка: всё доказательство одним пакетом."""
+    try:
+        session = auth_service.verify_proof(
+            db,
+            username=payload.username,
+            commitments=payload.commitments,
+            responses=payload.responses,
+            client_ip=_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    except auth_service.AuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    accepted = session.status == SessionStatus.SUCCESS
+    message = (
+        "Неинтерактивное доказательство принято"
+        if accepted
+        else "Неинтерактивное доказательство отклонено"
+    )
+    return ProofResponse(
         session_id=session.session_id,
         accepted=accepted,
         status=session.status.value,

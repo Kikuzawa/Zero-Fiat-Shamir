@@ -23,14 +23,19 @@ export const api = {
     }),
   authStart: (username) =>
     request('/auth/start', { method: 'POST', body: JSON.stringify({ username }) }),
-  authCommit: (sessionId, commitmentX) =>
+  authCommit: (sessionId, commitmentX, checksum) =>
     request('/auth/commit', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sessionId, commitment_x: commitmentX }),
+      body: JSON.stringify({ session_id: sessionId, commitment_x: commitmentX, checksum }),
     }),
-  authRespond: (sessionId, responseY) =>
+  authRespond: (sessionId, responseY, checksum) =>
     request('/auth/respond', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sessionId, response_y: responseY }),
+      body: JSON.stringify({ session_id: sessionId, response_y: responseY, checksum }),
+    }),
+  verifyProof: (username, commitments, responses) =>
+    request('/auth/verify-proof', {
+      method: 'POST',
+      body: JSON.stringify({ username, commitments, responses }),
     }),
 }

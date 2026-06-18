@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import secrets
 
-from app.crypto import egcd, make_response, mod_pow
+from app.crypto import (
+    derive_challenges,
+    egcd,
+    make_response,
+    mod_pow,
+    value_checksum,
+)
 from app.services import trusted_center
 
 
@@ -243,6 +249,172 @@ def test_partial_failures_then_lockout(client):
     # Ещё одна неудача — достигаем порога.
     _run_auth(client, "lockuser_c", secret, n, tamper=True)
     assert client.post("/api/auth/start", json={"username": "lockuser_c"}).status_code == 403
+
+
+def _noninteractive_proof(secret, n, rounds, *, tamper=False):
+    """Собрать неинтерактивное доказательство (эвристика Фиата–Шамира)."""
+    used = (secret + 1) if tamper else secret
+    rs = [1 + secrets.randbelow(n - 1) for _ in range(rounds)]
+    xs = [mod_pow(r, 2, n) for r in rs]
+    v = mod_pow(secret, 2, n)
+    challenges = derive_challenges(n, v, xs, rounds)
+    ys = [make_response(rs[i], used, challenges[i], n) for i in range(rounds)]
+    return [str(x) for x in xs], [str(y) for y in ys]
+
+
+# ---------------------------------------------------------------------------
+# Контроль целостности канала (искажение ≠ неверный ответ)
+# ---------------------------------------------------------------------------
+
+def test_integrity_error_on_commit_does_not_fail(client):
+    """Неверная контрольная сумма обязательства → переотправка без отказа."""
+    secret, n = _register(client, "intg_a")
+    start = client.post("/api/auth/start", json={"username": "intg_a"})
+    sid = start.json()["session_id"]
+
+    r = 1 + secrets.randbelow(n - 1)
+    x = mod_pow(r, 2, n)
+    # Контрольная сумма от другого значения — имитация искажения в канале.
+    bad = client.post(
+        "/api/auth/commit",
+        json={"session_id": sid, "commitment_x": str(x), "checksum": value_checksum(str(x + 1))},
+    )
+    assert bad.status_code == 200
+    body = bad.json()
+    assert body["integrity_error"] is True
+    assert body["challenge_e"] is None
+    # Состояние не изменилось — можно переотправить тот же раунд.
+    status = client.get(f"/api/auth/status/{sid}").json()
+    assert status["status"] == "awaiting_commitment"
+
+    # Повтор с верной суммой проходит штатно.
+    good = client.post(
+        "/api/auth/commit",
+        json={"session_id": sid, "commitment_x": str(x), "checksum": value_checksum(str(x))},
+    )
+    assert good.json()["integrity_error"] is False
+    assert good.json()["challenge_e"] in (0, 1)
+
+
+def test_integrity_error_on_respond_not_counted_as_failure(client):
+    """Искажение отклика не считается провалом и не идёт в порог ошибок."""
+    secret, n = _register(client, "intg_b")
+    start = client.post("/api/auth/start", json={"username": "intg_b"})
+    sid = start.json()["session_id"]
+
+    r = 1 + secrets.randbelow(n - 1)
+    x = mod_pow(r, 2, n)
+    commit = client.post(
+        "/api/auth/commit",
+        json={"session_id": sid, "commitment_x": str(x), "checksum": value_checksum(str(x))},
+    )
+    e = commit.json()["challenge_e"]
+    y = make_response(r, secret, e, n)
+
+    # Искажённый отклик: сумма не сходится.
+    bad = client.post(
+        "/api/auth/respond",
+        json={"session_id": sid, "response_y": str(y), "checksum": value_checksum(str(y + 1))},
+    )
+    assert bad.json()["integrity_error"] is True
+    # Сессия по-прежнему ждёт отклик (раунд не провален).
+    assert client.get(f"/api/auth/status/{sid}").json()["status"] == "awaiting_response"
+
+    # Переотправка верного отклика принимается.
+    good = client.post(
+        "/api/auth/respond",
+        json={"session_id": sid, "response_y": str(y), "checksum": value_checksum(str(y))},
+    )
+    assert good.json()["integrity_error"] is False
+    assert good.json()["accepted"] is True
+    # Технический сбой учтён отдельно в журнале сессии.
+    login = client.post("/api/admin/login", json={"username": "admin", "password": "admin"})
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
+    detail = client.get(f"/api/admin/sessions/{sid}", headers=headers).json()
+    assert detail["integrity_errors"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Неинтерактивный вариант (эвристика Фиата–Шамира): один пакет
+# ---------------------------------------------------------------------------
+
+def test_noninteractive_success(client):
+    secret, n = _register(client, "noni_a")
+    rounds = trusted_center.get_public_parameters()[1]
+    commitments, responses = _noninteractive_proof(secret, n, rounds)
+    resp = client.post(
+        "/api/auth/verify-proof",
+        json={"username": "noni_a", "commitments": commitments, "responses": responses},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["accepted"] is True
+    assert data["status"] == "success"
+    assert data["token"]
+    assert data["rounds_completed"] == rounds
+
+
+def test_noninteractive_impostor_rejected(client):
+    secret, n = _register(client, "noni_b")
+    rounds = trusted_center.get_public_parameters()[1]
+    commitments, responses = _noninteractive_proof(secret, n, rounds, tamper=True)
+    resp = client.post(
+        "/api/auth/verify-proof",
+        json={"username": "noni_b", "commitments": commitments, "responses": responses},
+    )
+    assert resp.json()["accepted"] is False
+    assert resp.json()["status"] == "failed"
+
+
+def test_noninteractive_wrong_count_rejected(client):
+    secret, n = _register(client, "noni_c")
+    rounds = trusted_center.get_public_parameters()[1]
+    commitments, responses = _noninteractive_proof(secret, n, rounds)
+    resp = client.post(
+        "/api/auth/verify-proof",
+        json={"username": "noni_c", "commitments": commitments[:-1], "responses": responses},
+    )
+    assert resp.status_code == 400
+
+
+def test_noninteractive_session_logged_with_mode(client):
+    secret, n = _register(client, "noni_d")
+    rounds = trusted_center.get_public_parameters()[1]
+    commitments, responses = _noninteractive_proof(secret, n, rounds)
+    resp = client.post(
+        "/api/auth/verify-proof",
+        json={"username": "noni_d", "commitments": commitments, "responses": responses},
+    )
+    sid = resp.json()["session_id"]
+
+    login = client.post("/api/admin/login", json={"username": "admin", "password": "admin"})
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
+    detail = client.get(f"/api/admin/sessions/{sid}", headers=headers).json()
+    assert detail["mode"] == "non-interactive"
+    assert len(detail["rounds"]) == rounds
+    assert all(r["verified"] for r in detail["rounds"])
+
+
+def test_noninteractive_failure_counts_toward_lockout(client):
+    """Неудачное неинтерактивное доказательство увеличивает счётчик блокировки."""
+    from app.config import get_settings
+
+    max_f = get_settings().max_failures
+    secret, n = _register(client, "noni_e")
+    rounds = trusted_center.get_public_parameters()[1]
+    for _ in range(max_f):
+        commitments, responses = _noninteractive_proof(secret, n, rounds, tamper=True)
+        client.post(
+            "/api/auth/verify-proof",
+            json={"username": "noni_e", "commitments": commitments, "responses": responses},
+        )
+    # Порог достигнут — даже неинтерактивный вход теперь заблокирован.
+    commitments, responses = _noninteractive_proof(secret, n, rounds)
+    blocked = client.post(
+        "/api/auth/verify-proof",
+        json={"username": "noni_e", "commitments": commitments, "responses": responses},
+    )
+    assert blocked.status_code == 403
 
 
 def test_lockout_visible_in_admin_users(client):

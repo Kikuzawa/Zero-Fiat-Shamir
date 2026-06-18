@@ -69,3 +69,33 @@ export function makeCommitment(n) {
 export function makeResponse(r, secret, challenge, n) {
   return challenge === 0 ? r % n : (r * secret) % n
 }
+
+// --- Защита от технических сбоев канала ------------------------------------
+//
+// Хэширование выполняется стандартной SHA-256 через Web Crypto (того же
+// требует эвристика Фиата–Шамира). Арифметика протокола остаётся самописной.
+
+// SHA-256 текста → hex-строка (совпадает с hashlib.sha256 на сервере).
+export async function sha256Hex(text) {
+  const data = new TextEncoder().encode(text)
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Контрольная сумма десятичной записи большого числа (для контроля целостности).
+export async function valueChecksum(decimalStr) {
+  return sha256Hex(decimalStr)
+}
+
+// Неинтерактивные бит-запросы: e_i = бит i от SHA-256(n | v | x_1 | … | x_t).
+// Должно полностью совпадать с derive_challenges на сервере.
+export async function deriveChallenges(n, verifier, commitments, rounds) {
+  const message = [n.toString(), verifier.toString(), ...commitments.map((x) => x.toString())].join('|')
+  const data = new TextEncoder().encode(message)
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', data))
+  let value = 0n
+  for (const b of digest) value = (value << 8n) | BigInt(b) // big-endian, как int.from_bytes(..., 'big')
+  const bits = []
+  for (let i = 0; i < rounds; i++) bits.push(Number((value >> BigInt(i)) & 1n))
+  return bits
+}

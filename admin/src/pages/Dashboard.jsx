@@ -109,7 +109,9 @@ function SessionModal({ sessionId, onClose }) {
               <div><span>Сессия</span><b className="mono">{detail.session_id}</b></div>
               <div><span>Пользователь</span><b>{detail.username || '—'}</b></div>
               <div><span>Статус</span><b><span className={`badge ${detail.status}`}>{STATUS_LABELS[detail.status] || detail.status}</span></b></div>
+              <div><span>Режим</span><b>{MODE_LABELS[detail.mode] || detail.mode}</b></div>
               <div><span>Раундов пройдено</span><b>{detail.current_round}/{detail.total_rounds}</b></div>
+              <div><span>Сбои канала</span><b>{detail.integrity_errors || 0}</b></div>
               <div><span>IP / агент</span><b>{detail.client_ip || '—'}</b></div>
               <div><span>Создана</span><b>{fmt(detail.created_at)}</b></div>
             </div>
@@ -229,17 +231,21 @@ function UsersTable({ rows }) {
   )
 }
 
+const MODE_LABELS = { interactive: 'интерактивный', 'non-interactive': 'неинтерактивный' }
+
 function SessionsTable({ rows, onInspect }) {
   return (
     <Table
-      columns={['Сессия', 'Пользователь', 'Статус', 'Раунд', 'IP', 'Создана', '']}
+      columns={['Сессия', 'Пользователь', 'Режим', 'Статус', 'Раунд', 'Сбои', 'IP', 'Создана', '']}
       rows={rows}
       render={(s) => (
         <tr key={s.session_id}>
           <td className="mono">{s.session_id.slice(0, 8)}…</td>
           <td>{s.username || '—'}</td>
+          <td>{MODE_LABELS[s.mode] || s.mode}</td>
           <td><span className={`badge ${s.status}`}>{STATUS_LABELS[s.status] || s.status}</span></td>
           <td>{s.current_round}/{s.total_rounds}</td>
+          <td>{s.integrity_errors > 0 ? <span className="badge warning">{s.integrity_errors}</span> : '—'}</td>
           <td>{s.client_ip || '—'}</td>
           <td>{fmt(s.created_at)}</td>
           <td><button className="link-btn" onClick={() => onInspect(s.session_id)}>Подробнее</button></td>

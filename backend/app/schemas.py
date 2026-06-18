@@ -51,21 +51,52 @@ class AuthStartResponse(BaseModel):
 class CommitRequest(BaseModel):
     session_id: str
     commitment_x: str = Field(..., description="Обязательство x = r^2 mod n")
+    checksum: str | None = Field(
+        None, description="SHA-256 от commitment_x для контроля целостности канала"
+    )
 
 
 class CommitResponse(BaseModel):
     session_id: str
     round_index: int = Field(..., description="Номер текущего раунда (с 1)")
-    challenge_e: int = Field(..., description="Бит-запрос e in {0,1}")
+    challenge_e: int | None = Field(None, description="Бит-запрос e in {0,1}")
     status: str
+    integrity_error: bool = Field(
+        False, description="Данные искажены в канале — раунд нужно переотправить"
+    )
+    message: str | None = None
 
 
 class RespondRequest(BaseModel):
     session_id: str
     response_y: str = Field(..., description="Отклик y = r * s^e mod n")
+    checksum: str | None = Field(
+        None, description="SHA-256 от response_y для контроля целостности канала"
+    )
 
 
 class RespondResponse(BaseModel):
+    session_id: str
+    accepted: bool
+    status: str
+    rounds_completed: int
+    total_rounds: int
+    token: str | None = None
+    message: str
+    integrity_error: bool = Field(
+        False, description="Данные искажены в канале — раунд нужно переотправить"
+    )
+
+
+# --- Неинтерактивный вариант (эвристика Фиата–Шамира) -----------------------
+
+class ProofRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    commitments: list[str] = Field(..., description="Обязательства x_1..x_t")
+    responses: list[str] = Field(..., description="Отклики y_1..y_t")
+
+
+class ProofResponse(BaseModel):
     session_id: str
     accepted: bool
     status: str
@@ -123,8 +154,10 @@ class SessionOut(BaseModel):
     session_id: str
     username: str | None
     status: str
+    mode: str
     current_round: int
     total_rounds: int
+    integrity_errors: int
     client_ip: str | None
     created_at: datetime
     expires_at: datetime
@@ -158,8 +191,10 @@ class SessionDetailOut(BaseModel):
     session_id: str
     username: str | None
     status: str
+    mode: str
     current_round: int
     total_rounds: int
+    integrity_errors: int
     modulus_n: str | None
     verifier_v: str | None
     client_ip: str | None

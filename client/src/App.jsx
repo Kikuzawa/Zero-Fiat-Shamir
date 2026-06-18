@@ -2,11 +2,15 @@ import { useEffect, useState } from 'react'
 import { api } from './api.js'
 import {
   computeVerifier,
+  deriveChallenges,
   generateSecret,
   makeCommitment,
   makeResponse,
+  valueChecksum,
 } from './crypto.js'
 import { listIdentities, loadSecret, saveSecret } from './secretStore.js'
+
+const MAX_RESEND = 4 // сколько раз переотправлять раунд при искажении канала
 
 export default function App() {
   const [params, setParams] = useState(null)
@@ -17,6 +21,8 @@ export default function App() {
   const [result, setResult] = useState(null)
   const [identities, setIdentities] = useState([])
   const [impostor, setImpostor] = useState(false)
+  const [mode, setMode] = useState('interactive') // interactive | non-interactive
+  const [simulateGlitch, setSimulateGlitch] = useState(false)
 
   useEffect(() => {
     api.getParams().then(setParams).catch((e) => addLog('Ошибка параметров: ' + e.message))
@@ -47,6 +53,99 @@ export default function App() {
     }
   }
 
+  // Отправка обязательства с контролем целостности и повтором при искажении.
+  // glitchRef.fire — одноразовая имитация сбоя канала (неверная контрольная сумма).
+  async function commitWithIntegrity(sessionId, x, glitchRef) {
+    for (let attempt = 1; attempt <= MAX_RESEND; attempt++) {
+      let checksum = await valueChecksum(x.toString())
+      if (glitchRef.fire) {
+        glitchRef.fire = false
+        checksum = await valueChecksum((x + 1n).toString()) // намеренно неверная сумма
+        addLog('Имитация сбоя канала: контрольная сумма обязательства искажена.', 'muted')
+      }
+      const res = await api.authCommit(sessionId, x.toString(), checksum)
+      if (res.integrity_error) {
+        addLog(`Сервер обнаружил искажение обязательства — повтор (${attempt}/${MAX_RESEND}).`, 'muted')
+        continue
+      }
+      return res
+    }
+    throw new Error('Повторные искажения канала при отправке обязательства')
+  }
+
+  async function respondWithIntegrity(sessionId, y, glitchRef) {
+    for (let attempt = 1; attempt <= MAX_RESEND; attempt++) {
+      let checksum = await valueChecksum(y.toString())
+      if (glitchRef.fire) {
+        glitchRef.fire = false
+        checksum = await valueChecksum((y + 1n).toString())
+        addLog('Имитация сбоя канала: контрольная сумма отклика искажена.', 'muted')
+      }
+      const res = await api.authRespond(sessionId, y.toString(), checksum)
+      if (res.integrity_error) {
+        addLog(`Сервер обнаружил искажение отклика — повтор (${attempt}/${MAX_RESEND}).`, 'muted')
+        continue
+      }
+      return res
+    }
+    throw new Error('Повторные искажения канала при отправке отклика')
+  }
+
+  // Интерактивный режим: пошаговый обмен «обязательство — запрос — отклик».
+  async function runInteractive(n, usedSecret) {
+    const start = await api.authStart(username)
+    addLog(`Старт сессии ${start.session_id.slice(0, 8)}…, раундов: ${start.total_rounds}`)
+    // Сбой имитируем один раз на первом раунде (на обязательстве).
+    const glitchRef = { fire: simulateGlitch }
+
+    let last = null
+    for (let i = 1; i <= start.total_rounds; i++) {
+      const { r, x } = makeCommitment(n)
+      const commit = await commitWithIntegrity(start.session_id, x, glitchRef)
+      const e = commit.challenge_e
+      const y = makeResponse(r, usedSecret, e, n)
+      const respond = await respondWithIntegrity(start.session_id, y, glitchRef)
+      last = respond
+      addLog(
+        `Раунд ${i}/${start.total_rounds}: запрос e=${e} → ${respond.accepted ? 'принят' : 'отклонён'}`,
+        respond.accepted ? 'info' : 'error',
+      )
+      if (!respond.accepted) break
+    }
+    return last && last.status === 'success' ? { ok: true, token: last.token } : { ok: false }
+  }
+
+  // Неинтерактивный режим: всё доказательство одним пакетом (эвристика Ф–Ш).
+  async function runNonInteractive(n, usedSecret) {
+    const rounds = params.rounds
+    addLog(`Неинтерактивный режим: формируем ${rounds} раундов локально одним пакетом.`)
+
+    const rs = []
+    const xs = []
+    for (let i = 0; i < rounds; i++) {
+      const { r, x } = makeCommitment(n)
+      rs.push(r)
+      xs.push(x)
+    }
+    // Запросы сервер выводит из хэша обязательств с открытым верификатором
+    // v = s^2 mod n настоящего секрета. Самозванец считает отклики неверным
+    // секретом, поэтому они не сойдутся с этими запросами и проверка провалится.
+    const realV = computeVerifier(loadSecret(username), n)
+    const challenges = await deriveChallenges(n, realV, xs, rounds)
+    const ys = xs.map((_, i) => makeResponse(rs[i], usedSecret, challenges[i], n))
+
+    const resp = await api.verifyProof(
+      username,
+      xs.map((x) => x.toString()),
+      ys.map((y) => y.toString()),
+    )
+    addLog(
+      `Пакет отправлен: пройдено ${resp.rounds_completed}/${resp.total_rounds} раундов.`,
+      resp.accepted ? 'success' : 'error',
+    )
+    return resp.status === 'success' ? { ok: true, token: resp.token } : { ok: false }
+  }
+
   async function handleLogin() {
     if (!username || !params) return
     const secret = loadSecret(username)
@@ -58,29 +157,16 @@ export default function App() {
     setResult(null)
     try {
       const n = BigInt(params.modulus_n)
-      const start = await api.authStart(username)
-      addLog(`Старт сессии ${start.session_id.slice(0, 8)}…, раундов: ${start.total_rounds}`)
-
-      // В режиме самозванца используем неверный секрет (s+1) — имитация стороны,
-      // не знающей настоящий секрет. Такой вход проваливается на первом e=1.
       const usedSecret = impostor ? secret + 1n : secret
       if (impostor) addLog('РЕЖИМ САМОЗВАНЦА: используется неверный секрет (s+1).', 'error')
 
-      let last = null
-      for (let i = 1; i <= start.total_rounds; i++) {
-        const { r, x } = makeCommitment(n)
-        const commit = await api.authCommit(start.session_id, x.toString())
-        const e = commit.challenge_e
-        const y = makeResponse(r, usedSecret, e, n)
-        const respond = await api.authRespond(start.session_id, y.toString())
-        last = respond
-        addLog(`Раунд ${i}/${start.total_rounds}: запрос e=${e} → ${respond.accepted ? 'принят' : 'отклонён'}`,
-          respond.accepted ? 'info' : 'error')
-        if (!respond.accepted) break
-      }
+      const outcome =
+        mode === 'non-interactive'
+          ? await runNonInteractive(n, usedSecret)
+          : await runInteractive(n, usedSecret)
 
-      if (last && last.status === 'success') {
-        setResult({ ok: true, token: last.token })
+      if (outcome.ok) {
+        setResult({ ok: true, token: outcome.token })
         addLog('Аутентификация успешна. Получен сессионный токен.', 'success')
       } else {
         setResult({ ok: false })
@@ -125,10 +211,31 @@ export default function App() {
           Отображаемое имя (необязательно)
           <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </label>
+
+        <fieldset className="modes">
+          <legend>Режим проверки</legend>
+          <label className="radio">
+            <input type="radio" name="mode" value="interactive"
+              checked={mode === 'interactive'} onChange={() => setMode('interactive')} />
+            Интерактивный (пошаговый обмен по сети)
+          </label>
+          <label className="radio">
+            <input type="radio" name="mode" value="non-interactive"
+              checked={mode === 'non-interactive'} onChange={() => setMode('non-interactive')} />
+            Неинтерактивный (одно доказательство одним пакетом)
+          </label>
+        </fieldset>
+
         <label className="checkbox">
           <input type="checkbox" checked={impostor} onChange={(e) => setImpostor(e.target.checked)} />
           Войти как самозванец (с неверным секретом) — для проверки стойкости
         </label>
+        <label className="checkbox">
+          <input type="checkbox" checked={simulateGlitch}
+            onChange={(e) => setSimulateGlitch(e.target.checked)} disabled={mode !== 'interactive'} />
+          Имитировать сбой канала (проверка контроля целостности) — только для интерактивного режима
+        </label>
+
         <div className="buttons">
           <button onClick={handleRegister} disabled={busy || !username}>Зарегистрироваться</button>
           <button onClick={handleLogin} disabled={busy || !username} className="primary">Войти</button>
