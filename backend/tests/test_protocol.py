@@ -1,0 +1,148 @@
+"""Интеграционные тесты протокола через REST API."""
+
+from __future__ import annotations
+
+import secrets
+
+from app.crypto import egcd, make_response, mod_pow
+from app.services import trusted_center
+
+
+def _new_secret(n: int) -> int:
+    while True:
+        s = 2 + secrets.randbelow(n - 3)
+        g, _, _ = egcd(s, n)
+        if g == 1:
+            return s
+
+
+def _register(client, username: str):
+    n, rounds, _ = trusted_center.get_public_parameters()
+    s = _new_secret(n)
+    v = mod_pow(s, 2, n)
+    resp = client.post(
+        "/api/register",
+        json={"username": username, "verifier_v": str(v)},
+    )
+    assert resp.status_code == 201, resp.text
+    return s, n
+
+
+def _run_auth(client, username, secret, n, *, tamper=False):
+    start = client.post("/api/auth/start", json={"username": username})
+    assert start.status_code == 200, start.text
+    sid = start.json()["session_id"]
+    total = start.json()["total_rounds"]
+
+    last = None
+    for _ in range(total):
+        r = 1 + secrets.randbelow(n - 1)
+        x = mod_pow(r, 2, n)
+        commit = client.post(
+            "/api/auth/commit", json={"session_id": sid, "commitment_x": str(x)}
+        )
+        assert commit.status_code == 200, commit.text
+        e = commit.json()["challenge_e"]
+        used = (secret + 1) if tamper else secret
+        y = make_response(r, used, e, n)
+        respond = client.post(
+            "/api/auth/respond", json={"session_id": sid, "response_y": str(y)}
+        )
+        assert respond.status_code == 200, respond.text
+        last = respond.json()
+        if not last["accepted"]:
+            break
+    return sid, last
+
+
+def test_params_endpoint(client):
+    resp = client.get("/api/params")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert int(data["modulus_n"]) > 0
+    assert data["rounds"] >= 1
+
+
+def test_register_and_honest_auth(client):
+    secret, n = _register(client, "alice")
+    sid, last = _run_auth(client, "alice", secret, n)
+    assert last["status"] == "success"
+    assert last["accepted"] is True
+    assert last["token"]
+    assert last["rounds_completed"] == last["total_rounds"]
+
+
+def test_duplicate_registration_rejected(client):
+    _register(client, "bob")
+    n, _, _ = trusted_center.get_public_parameters()
+    v = mod_pow(_new_secret(n), 2, n)
+    resp = client.post("/api/register", json={"username": "bob", "verifier_v": str(v)})
+    assert resp.status_code == 409
+
+
+def test_impostor_is_rejected(client):
+    secret, n = _register(client, "carol")
+    # Многократно: самозванец должен провалиться почти наверняка.
+    rejected = 0
+    attempts = 5
+    for _ in range(attempts):
+        _, last = _run_auth(client, "carol", secret, n, tamper=True)
+        if last["status"] == "failed":
+            rejected += 1
+    assert rejected == attempts
+
+
+def test_unknown_user_rejected(client):
+    resp = client.post("/api/auth/start", json={"username": "nobody"})
+    assert resp.status_code == 404
+
+
+def test_out_of_range_commitment_rejected(client):
+    secret, n = _register(client, "dave")
+    start = client.post("/api/auth/start", json={"username": "dave"})
+    sid = start.json()["session_id"]
+    resp = client.post(
+        "/api/auth/commit", json={"session_id": sid, "commitment_x": str(n)}
+    )
+    assert resp.status_code == 400
+
+
+def test_session_status_endpoint(client):
+    secret, n = _register(client, "erin")
+    start = client.post("/api/auth/start", json={"username": "erin"})
+    sid = start.json()["session_id"]
+    status = client.get(f"/api/auth/status/{sid}")
+    assert status.status_code == 200
+    assert status.json()["status"] == "awaiting_commitment"
+
+
+def test_admin_flow_and_overview(client):
+    secret, n = _register(client, "frank")
+    _run_auth(client, "frank", secret, n)  # success
+    _run_auth(client, "frank", secret, n, tamper=True)  # failure
+
+    login = client.post("/api/admin/login", json={"username": "admin", "password": "admin"})
+    assert login.status_code == 200
+    token = login.json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    overview = client.get("/api/admin/overview", headers=headers)
+    assert overview.status_code == 200
+    data = overview.json()
+    assert data["users_total"] >= 1
+    assert data["total_attempts"] >= 2
+
+    for path in ("users", "sessions", "results", "events"):
+        r = client.get(f"/api/admin/{path}", headers=headers)
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+
+def test_admin_requires_auth(client):
+    assert client.get("/api/admin/overview").status_code == 401
+    assert client.get("/api/admin/users").status_code == 401
+
+
+def test_admin_wrong_password(client):
+    resp = client.post("/api/admin/login", json={"username": "admin", "password": "x"})
+    assert resp.status_code == 401
