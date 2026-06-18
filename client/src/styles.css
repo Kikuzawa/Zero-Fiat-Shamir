@@ -50,6 +50,9 @@ input {
   font-size: 1rem;
 }
 
+.checkbox { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: var(--text); font-size: 0.85rem; }
+.checkbox input { width: auto; margin: 0; }
+
 .buttons { display: flex; gap: 12px; margin-top: 16px; }
 
 button {

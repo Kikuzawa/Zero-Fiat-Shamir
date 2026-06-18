@@ -91,6 +91,20 @@
 ### `GET /api/admin/sessions?limit=100`
 Список сессий аутентификации.
 
+### `GET /api/admin/sessions/{session_id}`
+Подробности сессии: параметры протокола (`modulus_n`, `verifier_v`) и **пораундовый
+журнал вычислений** — для каждого раунда сохранены обязательство `x`, запрос `e`,
+отклик `y`, обе части контрольного равенства (`lhs = y² mod n`, `rhs = x·vᵉ mod n`)
+и итог проверки `verified`.
+```json
+{ "session_id": "uuid", "username": "alice", "status": "success",
+  "current_round": 20, "total_rounds": 20, "modulus_n": "…", "verifier_v": "…",
+  "rounds": [
+    { "round_index": 1, "challenge_e": 0, "commitment_x": "…", "response_y": "…",
+      "lhs": "…", "rhs": "…", "verified": true, "created_at": "…" }
+  ] }
+```
+
 ### `GET /api/admin/results?limit=100`
 История попыток входа (исходы success/failure/timeout).
 

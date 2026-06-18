@@ -31,6 +31,7 @@ export const api = {
   overview: () => request('/admin/overview'),
   users: () => request('/admin/users'),
   sessions: () => request('/admin/sessions'),
+  sessionDetail: (sessionId) => request(`/admin/sessions/${sessionId}`),
   results: () => request('/admin/results'),
   events: () => request('/admin/events'),
   hasToken: () => !!getToken(),

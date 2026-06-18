@@ -138,6 +138,43 @@ def test_admin_flow_and_overview(client):
         assert isinstance(r.json(), list)
 
 
+def test_session_detail_round_log(client):
+    secret, n = _register(client, "grace")
+    sid, last = _run_auth(client, "grace", secret, n)
+    assert last["status"] == "success"
+
+    login = client.post("/api/admin/login", json={"username": "admin", "password": "admin"})
+    token = login.json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    detail = client.get(f"/api/admin/sessions/{sid}", headers=headers)
+    assert detail.status_code == 200
+    data = detail.json()
+    # Все раунды залогированы, в каждом lhs == rhs и verified=True.
+    assert len(data["rounds"]) == data["total_rounds"]
+    assert data["modulus_n"] and data["verifier_v"]
+    for r in data["rounds"]:
+        assert r["verified"] is True
+        assert r["lhs"] == r["rhs"]
+        assert r["challenge_e"] in (0, 1)
+
+
+def test_session_detail_impostor_shows_failed_round(client):
+    secret, n = _register(client, "heidi")
+    sid, last = _run_auth(client, "heidi", secret, n, tamper=True)
+    assert last["status"] == "failed"
+
+    login = client.post("/api/admin/login", json={"username": "admin", "password": "admin"})
+    headers = {"Authorization": f"Bearer {login.json()['token']}"}
+    data = client.get(f"/api/admin/sessions/{sid}", headers=headers).json()
+
+    # Последний залогированный раунд — проваленный (e=1, lhs != rhs).
+    last_round = data["rounds"][-1]
+    assert last_round["verified"] is False
+    assert last_round["challenge_e"] == 1
+    assert last_round["lhs"] != last_round["rhs"]
+
+
 def test_admin_requires_auth(client):
     assert client.get("/api/admin/overview").status_code == 401
     assert client.get("/api/admin/users").status_code == 401

@@ -154,6 +154,31 @@ class AuthResult(Base):
     user: Mapped[User | None] = relationship(back_populates="results")
 
 
+class AuthRoundLog(Base):
+    """Подробный журнал одного раунда протокола (для аудита и обучения).
+
+    Сохраняет все величины раунда «обязательство — запрос — отклик» и обе части
+    контрольного равенства `y^2 ≡ x * v^e (mod n)`, что позволяет администратору
+    проследить точные вычисления и проверки для каждой сессии.
+    """
+
+    __tablename__ = "auth_round_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    round_index: Mapped[int] = mapped_column(Integer, nullable=False)   # номер раунда (с 1)
+    commitment_x: Mapped[str] = mapped_column(Text, nullable=False)     # x = r^2 mod n
+    challenge_e: Mapped[int] = mapped_column(Integer, nullable=False)   # e in {0,1}
+    response_y: Mapped[str] = mapped_column(Text, nullable=False)       # y = r * s^e mod n
+    lhs: Mapped[str] = mapped_column(Text, nullable=False)              # y^2 mod n
+    rhs: Mapped[str] = mapped_column(Text, nullable=False)              # x * v^e mod n
+    verified: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class Event(Base):
     """Событие журнала, требующее внимания администратора."""
 

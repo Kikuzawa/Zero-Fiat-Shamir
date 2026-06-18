@@ -24,6 +24,7 @@ export default function Dashboard({ onLogout }) {
   const [overview, setOverview] = useState(null)
   const [rows, setRows] = useState([])
   const [error, setError] = useState(null)
+  const [selectedSession, setSelectedSession] = useState(null)
 
   function logout() {
     setToken(null)
@@ -74,9 +75,80 @@ export default function Dashboard({ onLogout }) {
 
       {tab === 'overview' && overview && <Overview data={overview} />}
       {tab === 'users' && <UsersTable rows={rows} />}
-      {tab === 'sessions' && <SessionsTable rows={rows} />}
+      {tab === 'sessions' && <SessionsTable rows={rows} onInspect={setSelectedSession} />}
       {tab === 'results' && <ResultsTable rows={rows} />}
       {tab === 'events' && <EventsTable rows={rows} />}
+
+      {selectedSession && (
+        <SessionModal sessionId={selectedSession} onClose={() => setSelectedSession(null)} />
+      )}
+    </div>
+  )
+}
+
+function SessionModal({ sessionId, onClose }) {
+  const [detail, setDetail] = useState(null)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    api.sessionDetail(sessionId).then(setDetail).catch((e) => setError(e.message))
+  }, [sessionId])
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h2>Журнал сессии</h2>
+          <button onClick={onClose}>✕</button>
+        </div>
+        {error && <p className="error">{error}</p>}
+        {!detail && !error && <p className="muted">Загрузка…</p>}
+        {detail && (
+          <div className="modal-body">
+            <div className="kv">
+              <div><span>Сессия</span><b className="mono">{detail.session_id}</b></div>
+              <div><span>Пользователь</span><b>{detail.username || '—'}</b></div>
+              <div><span>Статус</span><b><span className={`badge ${detail.status}`}>{STATUS_LABELS[detail.status] || detail.status}</span></b></div>
+              <div><span>Раундов пройдено</span><b>{detail.current_round}/{detail.total_rounds}</b></div>
+              <div><span>IP / агент</span><b>{detail.client_ip || '—'}</b></div>
+              <div><span>Создана</span><b>{fmt(detail.created_at)}</b></div>
+            </div>
+
+            <h3>Параметры протокола (Fiat–Shamir)</h3>
+            <div className="formula">
+              <div>Модуль <code>n</code> = <span className="bignum">{detail.modulus_n}</span></div>
+              <div>Верификатор <code>v = s² mod n</code> = <span className="bignum">{detail.verifier_v}</span></div>
+              <div className="muted">Секрет <code>s</code> на сервере отсутствует — хранится только у клиента.</div>
+            </div>
+
+            <h3>Пораундовые вычисления и проверки</h3>
+            <p className="muted">
+              В каждом раунде проверяется равенство <code>y² ≡ x·vᵉ (mod n)</code>.
+            </p>
+            {detail.rounds.length === 0 ? (
+              <p className="muted">Раунды ещё не выполнялись.</p>
+            ) : (
+              detail.rounds.map((r) => (
+                <div key={r.round_index} className={`round ${r.verified ? 'ok' : 'fail'}`}>
+                  <div className="round-head">
+                    Раунд {r.round_index} · запрос <code>e = {r.challenge_e}</code> ·{' '}
+                    {r.verified ? '✓ принят' : '✗ отклонён'}
+                  </div>
+                  <div className="round-row"><span>Обязательство <code>x = r² mod n</code></span><span className="bignum">{r.commitment_x}</span></div>
+                  <div className="round-row"><span>Отклик <code>y = r·s^{r.challenge_e} mod n</code></span><span className="bignum">{r.response_y}</span></div>
+                  <div className="round-row"><span>Левая часть <code>y² mod n</code></span><span className="bignum">{r.lhs}</span></div>
+                  <div className="round-row"><span>Правая часть <code>x·v^{r.challenge_e} mod n</code></span><span className="bignum">{r.rhs}</span></div>
+                  <div className="round-verdict">
+                    {r.lhs === r.rhs
+                      ? 'Левая часть = правой → проверка пройдена'
+                      : 'Левая часть ≠ правой → проверка провалена (доказывающий не знает секрет)'}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -141,10 +213,10 @@ function UsersTable({ rows }) {
   )
 }
 
-function SessionsTable({ rows }) {
+function SessionsTable({ rows, onInspect }) {
   return (
     <Table
-      columns={['Сессия', 'Пользователь', 'Статус', 'Раунд', 'IP', 'Создана', 'Истекает']}
+      columns={['Сессия', 'Пользователь', 'Статус', 'Раунд', 'IP', 'Создана', '']}
       rows={rows}
       render={(s) => (
         <tr key={s.session_id}>
@@ -154,7 +226,7 @@ function SessionsTable({ rows }) {
           <td>{s.current_round}/{s.total_rounds}</td>
           <td>{s.client_ip || '—'}</td>
           <td>{fmt(s.created_at)}</td>
-          <td>{fmt(s.expires_at)}</td>
+          <td><button className="link-btn" onClick={() => onInspect(s.session_id)}>Подробнее</button></td>
         </tr>
       )}
     />

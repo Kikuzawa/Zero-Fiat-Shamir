@@ -141,6 +141,33 @@ class ResultOut(BaseModel):
     created_at: datetime
 
 
+class RoundLogOut(BaseModel):
+    round_index: int
+    challenge_e: int
+    commitment_x: str
+    response_y: str
+    lhs: str
+    rhs: str
+    verified: bool
+    created_at: datetime
+
+
+class SessionDetailOut(BaseModel):
+    session_id: str
+    username: str | None
+    status: str
+    current_round: int
+    total_rounds: int
+    modulus_n: str | None
+    verifier_v: str | None
+    client_ip: str | None
+    user_agent: str | None
+    created_at: datetime
+    expires_at: datetime
+    completed_at: datetime | None
+    rounds: list[RoundLogOut]
+
+
 class EventOut(BaseModel):
     id: int
     type: str

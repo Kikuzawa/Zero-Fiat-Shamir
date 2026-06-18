@@ -16,6 +16,7 @@ from .fiatshamir import (
     mod_mul,
     mod_pow,
     verify_round,
+    verify_round_detailed,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "mod_mul",
     "mod_pow",
     "verify_round",
+    "verify_round_detailed",
 ]

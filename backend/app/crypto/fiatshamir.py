@@ -214,17 +214,31 @@ def make_response(r: int, secret: int, challenge: int, n: int) -> int:
     return r * secret % n
 
 
+def verify_round_detailed(commitment: int, challenge: int, response: int,
+                          verifier: int, n: int) -> dict:
+    """Проверка раунда с возвратом всех промежуточных вычислений.
+
+    Возвращает словарь с левой и правой частями контрольного равенства
+    `y^2 ≡ x * v^e (mod n)` и итогом проверки — для подробного журнала.
+    """
+    if challenge not in (0, 1):
+        raise ValueError("challenge must be 0 or 1")
+    degenerate = commitment % n == 0 or response % n == 0
+    lhs = mod_pow(response, 2, n)                              # y^2 mod n
+    rhs = commitment * mod_pow(verifier, challenge, n) % n     # x * v^e mod n
+    verified = (not degenerate) and lhs == rhs
+    return {
+        "lhs": lhs,
+        "rhs": rhs,
+        "verified": verified,
+        "degenerate": degenerate,
+    }
+
+
 def verify_round(commitment: int, challenge: int, response: int,
                  verifier: int, n: int) -> bool:
     """Шаг проверяющего: проверка равенства  y^2 ≡ x * v^e (mod n)."""
-    if challenge not in (0, 1):
-        raise ValueError("challenge must be 0 or 1")
-    # Отклонять вырожденные обязательства/отклики (x = 0 или y = 0).
-    if commitment % n == 0 or response % n == 0:
-        return False
-    left = mod_pow(response, 2, n)
-    right = commitment * mod_pow(verifier, challenge, n) % n
-    return left == right
+    return verify_round_detailed(commitment, challenge, response, verifier, n)["verified"]
 
 
 def cheating_probability(rounds: int) -> float:

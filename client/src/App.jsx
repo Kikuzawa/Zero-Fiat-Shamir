@@ -16,6 +16,7 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState(null)
   const [identities, setIdentities] = useState([])
+  const [impostor, setImpostor] = useState(false)
 
   useEffect(() => {
     api.getParams().then(setParams).catch((e) => addLog('Ошибка параметров: ' + e.message))
@@ -60,12 +61,17 @@ export default function App() {
       const start = await api.authStart(username)
       addLog(`Старт сессии ${start.session_id.slice(0, 8)}…, раундов: ${start.total_rounds}`)
 
+      // В режиме самозванца используем неверный секрет (s+1) — имитация стороны,
+      // не знающей настоящий секрет. Такой вход проваливается на первом e=1.
+      const usedSecret = impostor ? secret + 1n : secret
+      if (impostor) addLog('РЕЖИМ САМОЗВАНЦА: используется неверный секрет (s+1).', 'error')
+
       let last = null
       for (let i = 1; i <= start.total_rounds; i++) {
         const { r, x } = makeCommitment(n)
         const commit = await api.authCommit(start.session_id, x.toString())
         const e = commit.challenge_e
-        const y = makeResponse(r, secret, e, n)
+        const y = makeResponse(r, usedSecret, e, n)
         const respond = await api.authRespond(start.session_id, y.toString())
         last = respond
         addLog(`Раунд ${i}/${start.total_rounds}: запрос e=${e} → ${respond.accepted ? 'принят' : 'отклонён'}`,
@@ -118,6 +124,10 @@ export default function App() {
         <label>
           Отображаемое имя (необязательно)
           <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        </label>
+        <label className="checkbox">
+          <input type="checkbox" checked={impostor} onChange={(e) => setImpostor(e.target.checked)} />
+          Войти как самозванец (с неверным секретом) — для проверки стойкости
         </label>
         <div className="buttons">
           <button onClick={handleRegister} disabled={busy || !username}>Зарегистрироваться</button>

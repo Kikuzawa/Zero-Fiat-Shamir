@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import security
 from ..database import get_db
-from ..models import AuthResult, AuthSession, Event, User
+from ..models import AuthResult, AuthRoundLog, AuthSession, Event, User
 from ..schemas import (
     AdminLoginRequest,
     AdminLoginResponse,
     EventOut,
     OverviewResponse,
     ResultOut,
+    RoundLogOut,
+    SessionDetailOut,
     SessionOut,
     UserOut,
 )
@@ -71,6 +73,53 @@ def list_sessions(
         )
         for s in sessions
     ]
+
+
+@router.get(
+    "/sessions/{session_id}",
+    response_model=SessionDetailOut,
+    dependencies=[security.AdminDep],
+)
+def session_detail(session_id: str, db: Session = Depends(get_db)):
+    """Подробности сессии: параметры протокола и пораундовый журнал вычислений."""
+    s = db.query(AuthSession).filter(AuthSession.session_id == session_id).first()
+    if s is None:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+
+    verifier = s.user.verifier if s.user else None
+    rounds = (
+        db.query(AuthRoundLog)
+        .filter(AuthRoundLog.session_id == session_id)
+        .order_by(AuthRoundLog.round_index.asc())
+        .all()
+    )
+    return SessionDetailOut(
+        session_id=s.session_id,
+        username=s.user.username if s.user else None,
+        status=s.status.value,
+        current_round=s.current_round,
+        total_rounds=s.total_rounds,
+        modulus_n=verifier.modulus_n if verifier else None,
+        verifier_v=verifier.verifier_v if verifier else None,
+        client_ip=s.client_ip,
+        user_agent=s.user_agent,
+        created_at=s.created_at,
+        expires_at=s.expires_at,
+        completed_at=s.completed_at,
+        rounds=[
+            RoundLogOut(
+                round_index=r.round_index,
+                challenge_e=r.challenge_e,
+                commitment_x=r.commitment_x,
+                response_y=r.response_y,
+                lhs=r.lhs,
+                rhs=r.rhs,
+                verified=r.verified,
+                created_at=r.created_at,
+            )
+            for r in rounds
+        ],
+    )
 
 
 @router.get("/results", response_model=list[ResultOut], dependencies=[security.AdminDep])

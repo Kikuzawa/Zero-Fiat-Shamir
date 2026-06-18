@@ -21,9 +21,10 @@ from datetime import timedelta
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
-from ..crypto import make_challenge, verify_round
+from ..crypto import make_challenge, verify_round_detailed
 from ..models import (
     AuthOutcome,
+    AuthRoundLog,
     AuthSession,
     EventSeverity,
     EventType,
@@ -180,7 +181,23 @@ def submit_response(db: Session, session_id: str, response_y: str) -> AuthSessio
     except ValueError as exc:
         raise AuthError("Отклик должен быть целым числом") from exc
 
-    ok = verify_round(commitment=x, challenge=e, response=y, verifier=v, n=n)
+    detail = verify_round_detailed(commitment=x, challenge=e, response=y, verifier=v, n=n)
+    ok = detail["verified"]
+
+    # Подробный журнал раунда: все величины и обе части контрольного равенства.
+    db.add(
+        AuthRoundLog(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            round_index=session.current_round + 1,
+            commitment_x=str(x),
+            challenge_e=e,
+            response_y=str(y),
+            lhs=str(detail["lhs"]),
+            rhs=str(detail["rhs"]),
+            verified=ok,
+        )
+    )
 
     if not ok:
         # Раунд провален — вся попытка входа отклоняется.
