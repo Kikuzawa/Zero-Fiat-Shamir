@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+backend/instance/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Прочее
+*.log
+.DS_Store
+.env

@@ -1,0 +1,43 @@
+"""Криптографическое ядро системы (протокол Фиата–Шамира)."""
+
+from .fiatshamir import (
+    KeyPair,
+    PublicParameters,
+    cheating_probability,
+    derive_challenges,
+    egcd,
+    generate_keypair,
+    generate_modulus,
+    generate_prime,
+    is_probable_prime,
+    make_challenge,
+    make_commitment,
+    make_response,
+    mod_inverse,
+    mod_mul,
+    mod_pow,
+    value_checksum,
+    verify_round,
+    verify_round_detailed,
+)
+
+__all__ = [
+    "KeyPair",
+    "PublicParameters",
+    "cheating_probability",
+    "derive_challenges",
+    "egcd",
+    "generate_keypair",
+    "generate_modulus",
+    "generate_prime",
+    "is_probable_prime",
+    "make_challenge",
+    "make_commitment",
+    "make_response",
+    "mod_inverse",
+    "mod_mul",
+    "mod_pow",
+    "value_checksum",
+    "verify_round",
+    "verify_round_detailed",
+]

@@ -1,0 +1,64 @@
+services:
+
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: zerofs_root
+      MYSQL_DATABASE: zerofs
+      MYSQL_USER: zerofs
+      MYSQL_PASSWORD: zerofs
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "zerofs", "-pzerofs"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    restart: on-failure
+    ports:
+      - "8000:8000"
+    environment:
+      ZEROFS_DATABASE_URL: mysql+pymysql://zerofs:zerofs@db:3306/zerofs
+      ZEROFS_MODULUS_BITS: "512"
+      ZEROFS_ROUNDS: "20"
+      ZEROFS_SESSION_TTL: "120"
+      ZEROFS_ADMIN_USER: admin
+      ZEROFS_ADMIN_PASSWORD: admin
+      ZEROFS_CORS_ORIGINS: "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174"
+    volumes:
+      - backend_data:/app/instance
+    depends_on:
+      db:
+        condition: service_healthy
+
+  client:
+    build:
+      context: ./client
+      args:
+        VITE_API_URL: http://localhost:8000/api
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+  admin:
+    build:
+      context: ./admin
+      args:
+        VITE_API_URL: http://localhost:8000/api
+    restart: unless-stopped
+    ports:
+      - "5174:80"
+    depends_on:
+      - backend
+
+volumes:
+  db_data:
+  backend_data:
